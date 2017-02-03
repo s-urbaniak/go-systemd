@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unsafe"
 )
 
 // Priority of a journal message
@@ -50,7 +51,13 @@ const (
 	PriDebug
 )
 
-var conn *net.UnixConn
+var (
+	conn *net.UnixConn
+
+	journaldPath = []int8{
+		'/', 'r', 'u', 'n', '/', 's', 'y', 's', 't', 'e', 'm', 'd', '/', 'j', 'o', 'u', 'r', 'n', 'a', 'l', '/', 's', 'o', 'c', 'k', 'e', 't',
+	}
+)
 
 func init() {
 	var err error
@@ -104,7 +111,34 @@ func Send(message string, priority Priority, vars map[string]string) error {
 
 		rights := syscall.UnixRights(int(file.Fd()))
 
-		conn.WriteMsgUnix([]byte{}, rights, socketAddr)
+		sa := syscall.RawSockaddrUnix{
+			Family: syscall.AF_UNIX,
+		}
+		copy(sa.Path[:], journaldPath)
+
+		var msg syscall.Msghdr
+		msg.Name = (*byte)(unsafe.Pointer(&sa))
+		// Namelen is family len(uint16) (2 bytes) + len(path) + \0 (1 byte)
+		msg.Namelen = uint32(3 + len(journaldPath))
+		msg.Control = (*byte)(unsafe.Pointer(&rights[0]))
+		msg.SetControllen(len(rights))
+
+		f, err := conn.File()
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		_, _, errno := syscall.Syscall(
+			syscall.SYS_SENDMSG,
+			f.Fd(),
+			uintptr(unsafe.Pointer(&msg)),
+			0,
+		)
+
+		if errno != 0 {
+			return errno
+		}
 	} else if err != nil {
 		return journalError(err.Error())
 	}
